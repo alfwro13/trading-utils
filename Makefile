@@ -1,101 +1,43 @@
-export PROJECTNAME=$(shell basename "$(PWD)")
-VENV_PATH=./.venv/bin
-DTALE=./venv/bin/dtale
+# Define where our tools are located inside the virtual environment
+VENV_BIN=./venv/bin
+PYTHON=$(VENV_BIN)/python3
+PIP=$(VENV_BIN)/pip
 
-.SILENT: ;               # no need for @
+.SILENT: ;
 
-setup: ## Setup Virtual Env
-	python3.12 -m venv venv
-	$(VENV_PATH)/python3 -m pip install --upgrade pip
+setup: ## Create environment and install everything
+	# 1. Create the virtual environment if it doesn't exist
+	test -d venv || python3 -m venv venv
+	# 2. Upgrade the basic tools
+	$(PYTHON) -m pip install --upgrade pip setuptools wheel
+	# 3. Install the project requirements
 	$(PIP) install -r requirements/dev.txt
+	$(PIP) install -r requirements.txt
+	echo "Setup complete! Use 'source venv/bin/activate' to start."
 
-deps: ## Install dependencies
-	uv tool install pre-commit
-	uv pip install -r requirements.txt
+deps: ## Update dependencies
+	$(PIP) install -r requirements.txt
 
-pre-commit: ## Manually run all precommit hooks
-	uv tool run pre-commit
+ftplist: ## Download stock list
+	$(PYTHON) download_stocklist.py
 
-pre-commit-tool: ## Manually run a single pre-commit hook
-	$(VENV_PATH)/pre-commit run $(TOOL) --all-files
+stocksohlcv: ## Download stock data
+	$(PYTHON) download_stocks_ohlcv.py
 
-clean: ## Clean package
+etfsohlcv: ## Download ETF data
+	$(PYTHON) download_macro_etfs.py
+
+enrich: ## Calculate indicators
+	$(PYTHON) stocks_data_enricher.py
+
+weekend: ftplist stocksohlcv etfsohlcv enrich ## Run full weekend analysis
+
+clean: ## Remove temporary files
 	find . -type d -name '__pycache__' | xargs rm -rf
-	rm -rf build dist
+	rm -rf venv build dist
 
-bpython: ## Run bpython
-	$(VENV_PATH)/bpython
-
-ftplist: ## Download stocks from Nasdaq FTP Server
-	$(VENV_PATH)/python3 download_stocklist.py
-
-stocksohlcv: ## Download OHLCV of all available stocks
-	$(VENV_PATH)/python3 download_stocks_ohlcv.py
-
-etfsohlcv: ## Download OHLCV of all Macro ETFs
-	$(VENV_PATH)/python3 download_macro_etfs.py
-
-weeklyoptions: ## Download list of Symbols with weekly options
-	$(VENV_PATH)/python3 download_weekly_option_symbols.py -v
-
-enrich: ## Enrich data and calculate indicators
-	$(VENV_PATH)/python3 stocks_data_enricher.py
-	$(VENV_PATH)/python3 tele_message.py -m "Completed data enrichment"
-
-dtale: ## Open DTale
-	uvx dtale --open-browser --csv-path $(csvpath)
-
-weekend: ftplist stocksohlcv etfsohlcv enrich ## Refreshes stock list, download OHLCV data and run analysis
-
-deploy: clean ## Copies any changed file to the server
-	ssh ${PROJECTNAME} -C 'bash -l -c "mkdir -vp ./${PROJECTNAME}/output"'
-	rsync -avzr \
-		.env \
-		pyproject.toml \
-		uv.lock \
-		data \
-		common \
-		scripts \
-		crypto_ma_trade_bot.py \
-		crypto_rsi_trade_bot.py \
-		crypto_strat_bot.py \
-		tele_spy_trade_bot.py \
-		tele_links.py \
-		tele_twitter.py \
-		options_price_tracker.py \
-		tele_theta_gang_bot.py \
-		tele_spx_theta_gang_bot.py \
-		tele_stock_alerts_bot.py \
-		tqqq-for-the-long-run.py \
-		tqqq-vol-buckets.py \
-		tqqq-vol-regimes.py \
-		yfinance-box.py \
-		webpages.txt \
-		requirements \
-		requirements.txt \
-		${PROJECTNAME}:./${PROJECTNAME}
-
-start: deploy ## Sets up a screen session on the server and start the app
-	ssh ${PROJECTNAME} -C 'bash -l -c "./${PROJECTNAME}/scripts/setup_apps.sh ${PROJECTNAME}"'
-
-stop: deploy ## Stop any running screen session on the server
-	ssh ${PROJECTNAME} -C 'bash -l -c "./${PROJECTNAME}/scripts/stop_apps.sh ${PROJECTNAME}"'
-
-ssh: ## SSH into the target VM
-	ssh ${PROJECTNAME}
-
-syncoptionspricedata: ## Sync options price tracker database
-	rm ~/options_tracker.db; rsync -avzr ${PROJECTNAME}:./options_tracker.db ~/options_tracker.db
-
-synccryptobotdiary: ## Sync crypto bot diary
-	rm ~/crypto_trade_diary.db; rsync -avzr ${PROJECTNAME}:./crypto_trade_diary.db ~/crypto_trade_diary.db
-
-.PHONY: help
+.PHONY: help setup deps weekend clean
 .DEFAULT_GOAL := help
 
-help: Makefile
-	echo
-	echo " Choose a command run in "$(PROJECTNAME)":"
-	echo
+help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
-	echo

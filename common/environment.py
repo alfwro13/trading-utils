@@ -1,5 +1,4 @@
 import os
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,8 +9,6 @@ EXCHANGE_API_SECRET = os.getenv("EXCHANGE_API_SECRET")
 EXCHANGE = os.getenv("EXCHANGE")
 
 # Telegram
-
-# PERSONAL_CHAT_ID = os.getenv("CHAT_ID")
 DEFAULT_BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
 TELEGRAM_STOCK_RIDER_BOT = os.getenv("TELEGRAM_STOCK_RIDER_BOT")
@@ -29,20 +26,20 @@ TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
 TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL")
 TRADIER_TOKEN = os.getenv("TRADIER_TOKEN")
 
-# ACCOUNT
-TRADING_ACCOUNT_VALUE = int(os.getenv("TRADING_ACCOUNT_VALUE"))
-TRADING_RISK_FACTOR = float(os.getenv("TRADING_RISK_FACTOR")) / 100
-TRADING_MAX_DD = float(os.getenv("TRADING_MAX_DD_PCT")) / 100
-PROFIT_TARGET_PCT = float(os.getenv("PROFIT_TARGET_PCT")) / 100
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT")) / 100
+# ACCOUNT (Added defaults to prevent crashes)
+TRADING_ACCOUNT_VALUE = int(os.getenv("TRADING_ACCOUNT_VALUE", "10000"))
+TRADING_RISK_FACTOR = float(os.getenv("TRADING_RISK_FACTOR", "1.0")) / 100
+TRADING_MAX_DD = float(os.getenv("TRADING_MAX_DD_PCT", "10.0")) / 100
+PROFIT_TARGET_PCT = float(os.getenv("PROFIT_TARGET_PCT", "20.0")) / 100
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "10.0")) / 100
 
 # CoinMarketCap
 COIN_MARKET_CAP_API_KEY = os.getenv("COIN_MARKET_CAP_API_KEY")
 
 # SPX Iron Condor Strategy
-DTE_TO_TARGET = int(os.getenv("DTE_TO_TARGET"))
-SHORT_STRIKE_DELTA = float(os.getenv("SHORT_STRIKE_DELTA"))
-LONG_STRIKE_DISTANCE = int(os.getenv("LONG_STRIKE_DISTANCE"))
+DTE_TO_TARGET = int(os.getenv("DTE_TO_TARGET", "45"))
+SHORT_STRIKE_DELTA = float(os.getenv("SHORT_STRIKE_DELTA", "0.30"))
+LONG_STRIKE_DISTANCE = int(os.getenv("LONG_STRIKE_DISTANCE", "10"))
 
 # Pushover
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
