@@ -62,13 +62,26 @@ def get_cached_data(symbol, start, end, force_download=False):
 def download_tickers_data(tickers, start, end):
     print(f"Downloading data for {len(tickers)} tickers")
     bad_tickers = []
+    
+    # We need the output directory path
+    out_dir = output_dir()
+
     for t in tqdm(tickers):
         try:
-            download_ticker_data(t, start, end)
+            # Download the data
+            df = download_ticker_data(t, start, end)
+            
+            # THE FIX: Save the data to a CSV file so the enricher can find it
+            if not df.empty:
+                df.to_csv(f"{out_dir}/{t}.csv")
+            else:
+                bad_tickers.append(dict(symbol=t, reason="No data returned from Yahoo Finance"))
+                
         except Exception as e:
-            bad_tickers.append(dict(symbol=t, reason=e))
+            bad_tickers.append(dict(symbol=t, reason=str(e)))
+
     if bad_tickers:
-        print("Unable to download these tickers")
-        print(bad_tickers)
+        print(f"Unable to download {len(bad_tickers)} tickers. Check the logs for details.")
+
 
 large_cap_companies = load_all_tickers(market_type="large-cap")
