@@ -6,13 +6,17 @@
 #   "yfinance",
 #   "stockstats",
 #   "persistent-cache@git+https://github.com/namuan/persistent-cache",
-#   "plotly"
+#   "plotly",
+#   "playwright",
+#   "requests",
+#   "python-dotenv",
+#   "schedule"
 # ]
 # ///
 """
 Daily Rebalance Report - Combined Market Analysis
 
-Combines VIX signals, VIX comparative analysis, and credit market canary analysis
+Combines VIX signals and credit market canary analysis
 into a single HTML report with all plots.
 
 Usage:
@@ -20,26 +24,29 @@ Usage:
 ./daily-rebalance-report.py --start-date 2024-01-01
 ./daily-rebalance-report.py --start-date 2024-01-01 --end-date 2024-12-31
 ./daily-rebalance-report.py --start-date 2024-01-01 --report-path report.html --open
+./daily-rebalance-report.py --start-date 2024-01-01 --pdf --open
+./daily-rebalance-report.py --start-date 2024-01-01 --pdf --send-telegram
 ./daily-rebalance-report.py --start-date 2024-01-01 -v # INFO logging
 ./daily-rebalance-report.py --start-date 2024-01-01 -vv # DEBUG logging
+./daily-rebalance-report.py -b  # Run as bot (scheduled at 9:00 AM on weekdays)
+./daily-rebalance-report.py --once  # Generate & send report via Telegram once and exit
 """
 
 import logging
 import os
-import subprocess
 import sys
 import tempfile
+import time
 import webbrowser
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
-from base64 import b64encode
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import schedule
 import yfinance as yf
 from persistent_cache import PersistentCache
 from plotly.subplots import make_subplots
@@ -47,6 +54,8 @@ from plotly.subplots import make_subplots
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from stockstats import wrap as stockstats_wrap
+
+from common.tele_notifier import send_file_to_telegram
 
 # TQQQ Volatility Buckets Strategy Configuration
 EXPOSURE_LEVELS = [0.00, 0.25, 0.70]  # Available exposure buckets
@@ -303,89 +312,6 @@ def generate_vix_signals_stats(
     </table>
     """
     return stats
-
-
-# ============================================================================
-# VIX Comparative Analysis
-# ============================================================================
-
-
-def normalize_prices(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Normalize all prices to start at 100 for comparison."""
-    normalized_data = {}
-
-    for symbol, df in data.items():
-        if df.empty:
-            logging.warning(f"No data for {symbol}")
-            continue
-
-        # Use Close price
-        if isinstance(df.columns, pd.MultiIndex):
-            prices = df["Close"].iloc[:, 0] if df["Close"].shape[1] > 0 else df["Close"]
-        else:
-            prices = df["Close"]
-
-        # Normalize to start at 100
-        normalized = (prices / prices.iloc[0]) * 100
-        normalized_data[symbol] = normalized
-
-    return pd.DataFrame(normalized_data)
-
-
-def create_vix_comparative_chart(normalized_df: pd.DataFrame):
-    """Create comparative price chart with SPY and VIX indices using Plotly."""
-    fig = go.Figure()
-
-    # Plot SPY with higher line width
-    if "SPY" in normalized_df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=normalized_df.index,
-                y=normalized_df["SPY"],
-                name="SPY",
-                line=dict(color="blue", width=2.5),
-                opacity=0.8,
-            )
-        )
-
-    # Define colors for VIX symbols
-    vix_colors = {
-        "^VIX": "red",
-        "^VVIX": "orange",
-        "^VIX9D": "green",
-        "^VIX3M": "purple",
-    }
-
-    # Plot VIX-related symbols
-    for symbol in ["^VIX", "^VVIX", "^VIX9D", "^VIX3M"]:
-        if symbol in normalized_df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=normalized_df.index,
-                    y=normalized_df[symbol],
-                    name=symbol,
-                    line=dict(color=vix_colors.get(symbol, "gray"), width=1.5),
-                    opacity=0.7,
-                )
-            )
-
-    # Add horizontal line at 100 (starting point)
-    fig.add_hline(
-        y=100, line_dash="dash", line_color="black", opacity=0.5, line_width=1
-    )
-
-    fig.update_layout(
-        title="Comparative Price Chart: SPY vs VIX Indices",
-        xaxis_title="Date",
-        yaxis_title="Normalized Price (Starting at 100)",
-        height=600,
-        hovermode="x unified",
-    )
-
-    fig.update_xaxes(tickangle=45)
-    fig.update_yaxes(gridcolor="rgba(0,0,0,0.1)")
-
-    return fig
 
 
 # ============================================================================
@@ -752,8 +678,6 @@ def get_common_index(series_list):
 
 def run_tqqq_analysis(market_data: Dict[str, pd.DataFrame], use_alternate: bool = True):
     """Run TQQQ volatility bucket analysis."""
-    logging.info("Running TQQQ Volatility Bucket Analysis...")
-
     qqq_data = market_data.get("QQQ", pd.DataFrame())
     tqqq_data = market_data.get("TQQQ", pd.DataFrame())
     alternate_data = (
@@ -1010,8 +934,6 @@ def run_regime_state_machine(df, vol_ratio):
 
 def run_regime_analysis(market_data: Dict[str, pd.DataFrame]):
     """Run TQQQ volatility regime analysis."""
-    logging.info("Running TQQQ Volatility Regime Analysis...")
-
     qqq_data = market_data.get("QQQ", pd.DataFrame())
     tqqq_data = market_data.get("TQQQ", pd.DataFrame())
 
@@ -1141,68 +1063,6 @@ def generate_regime_stats(results_df) -> str:
 
 
 # ============================================================================
-# Options Expected Move Analysis
-# ============================================================================
-
-
-def run_options_script(symbol, output_path):
-    """Run options expected move script."""
-    script_dir = Path(__file__).parent
-    options_script = script_dir / "options-expected-move.py"
-    cmd = [
-        str(options_script),
-        "-s",
-        symbol,
-        "--multi-dte",
-        "--no-show",
-        "--output-file",
-        output_path,
-    ]
-    logging.info(f"Running command: {' '.join(cmd)}")
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-
-
-def encode_png_to_base64(file_path):
-    """Encode PNG file to base64 string."""
-    with open(file_path, "rb") as f:
-        return b64encode(f.read()).decode("utf-8")
-
-
-def generate_options_expected_move(symbol: str = "SPY") -> str:
-    """Generate options expected move chart and return base64 encoded PNG."""
-    logging.info(f"Generating options expected move chart for {symbol}...")
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".png", delete=False) as tmp_file:
-        output_path = tmp_file.name
-
-    try:
-        result = run_options_script(symbol, output_path)
-
-        if result.returncode != 0:
-            logging.error(
-                f"Failed to generate options expected move chart: {result.stderr}"
-            )
-            return None
-
-        img_base64 = encode_png_to_base64(output_path)
-        logging.info("Successfully generated options expected move chart")
-        return img_base64
-
-    except subprocess.TimeoutExpired:
-        logging.error("Options expected move generation timed out")
-        return None
-    except Exception as e:
-        logging.error(f"Error generating options expected move: {e}", exc_info=True)
-        return None
-    finally:
-        if os.path.exists(output_path):
-            try:
-                os.unlink(output_path)
-            except Exception as e:
-                logging.warning(f"Failed to delete temporary file {output_path}: {e}")
-
-
-# ============================================================================
 # HTML Report Generation
 # ============================================================================
 
@@ -1221,7 +1081,6 @@ def fig_to_html(fig):
 def generate_html_report(
     vix_signals_fig,
     vix_signals_stats,
-    vix_comparative_fig,
     credit_market_fig,
     credit_market_stats,
     tqqq_fig,
@@ -1229,7 +1088,6 @@ def generate_html_report(
     alternate_label,
     regime_fig,
     regime_stats,
-    options_expected_move_img,
     start_date,
     end_date,
 ):
@@ -1237,7 +1095,6 @@ def generate_html_report(
 
     # Convert figures to HTML
     vix_signals_html = fig_to_html(vix_signals_fig)
-    vix_comparative_html = fig_to_html(vix_comparative_fig)
     credit_market_html = fig_to_html(credit_market_fig)
     tqqq_html = fig_to_html(tqqq_fig)
     regime_html = fig_to_html(regime_fig)
@@ -1336,20 +1193,14 @@ def generate_html_report(
             </div>
 
             <div class="section">
-                <h2>2. VIX Comparative Analysis</h2>
-                <p>Comparative price performance of SPY vs various VIX indices (normalized to 100 at start date).</p>
-                <div class="plotly-chart">{vix_comparative_html}</div>
-            </div>
-
-            <div class="section">
-                <h2>3. Credit Market Canary</h2>
+                <h2>2. Credit Market Canary</h2>
                 <p>LQD:IEF ratio analysis as an early warning indicator for equity risk.</p>
                 {credit_market_stats}
                 <div class="plotly-chart">{credit_market_html}</div>
             </div>
 
             <div class="section">
-                <h2>4. TQQQ Volatility Bucket Strategy</h2>
+                <h2>3. TQQQ Volatility Bucket Strategy</h2>
                 <p>Dynamic position sizing for TQQQ based on QQQ volatility regimes with hysteresis to avoid overtrading.</p>
                 <p><strong>Strategy:</strong> Adjusts TQQQ exposure based on ATR-normalized volatility. Uninvested portion allocated to {alternate_label}.</p>
                 {tqqq_stats}
@@ -1357,18 +1208,11 @@ def generate_html_report(
             </div>
 
             <div class="section">
-                <h2>5. TQQQ Volatility Regime Strategy</h2>
+                <h2>4. TQQQ Volatility Regime Strategy</h2>
                 <p>State machine-based trading strategy for TQQQ using four volatility regimes: CALM, NORMAL, STRESS, and PANIC.</p>
                 <p><strong>Strategy:</strong> Uses ATR-based volatility normalization with persistence requirements to confirm regime changes.</p>
                 {regime_stats}
                 <div class="plotly-chart">{regime_html}</div>
-            </div>
-
-            <div class="section">
-                <h2>6. Options Expected Move (Multi-DTE)</h2>
-                <p>Multi-DTE expected move analysis based on options implied volatility for SPY.</p>
-                <p>Shows projected price ranges at 7, 14, 21, and 30 days to expiration based on at-the-money options IV.</p>
-                {"<div class='plotly-chart'><img src='data:image/png;base64," + options_expected_move_img + "' alt='Options Expected Move Chart'></div>" if options_expected_move_img else "<p style='color: #999; font-style: italic;'>Chart unavailable</p>"}
             </div>
 
             <div class="footer">
@@ -1397,19 +1241,6 @@ def run_vix_signals_analysis(start_date, end_date):
     vix_df = calculate_ivts(vix_market_data)
     vix_df = calculate_vix_signals(vix_df)
     return create_vix_signals_chart(vix_df), generate_vix_signals_stats(vix_df)
-
-
-def run_vix_comparative_analysis(start_date, end_date):
-    """Run VIX comparative analysis."""
-    logging.info("Running VIX Comparative Analysis...")
-    comparative_symbols = ["SPY", "^VIX", "^VVIX", "^VIX9D", "^VIX3M"]
-    comparative_data = fetch_all_symbols(
-        comparative_symbols,
-        start_date.strftime("%Y-%m-%d"),
-        end_date.strftime("%Y-%m-%d"),
-    )
-    normalized_df = normalize_prices(comparative_data)
-    return create_vix_comparative_chart(normalized_df)
 
 
 def run_credit_analysis(start_date, end_date):
@@ -1496,6 +1327,74 @@ def save_report(html_content, report_path):
     return report_path
 
 
+def generate_pdf_report(html_content, report_path):
+    """Generate PDF from HTML content using Playwright."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise ImportError(
+            "PDF generation requires Playwright. "
+            "Install it with: uv add playwright\n"
+            "Then install browsers: uv run playwright install chromium"
+        ) from e
+
+    # Determine output path
+    if report_path == "daily_rebalance_report.html":
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp.close()
+        pdf_path = tmp.name
+    elif report_path.lower().endswith(".html"):
+        pdf_path = report_path[:-5] + ".pdf"
+    else:
+        pdf_path = report_path + ".pdf"
+
+    # Write HTML to a temp file so Playwright can render it
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False
+    ) as tmp_html:
+        tmp_html.write(html_content)
+        html_path = tmp_html.name
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"file://{os.path.abspath(html_path)}")
+            page.wait_for_timeout(3000)  # Wait for Plotly charts to render
+            page.pdf(
+                path=pdf_path,
+                format="A4",
+                landscape=True,
+                print_background=True,
+                margin={
+                    "top": "20px",
+                    "right": "20px",
+                    "bottom": "20px",
+                    "left": "20px",
+                },
+            )
+            browser.close()
+        logging.info(f"PDF report saved to {pdf_path}")
+        return pdf_path
+    finally:
+        try:
+            os.unlink(html_path)
+        except Exception as e:
+            logging.warning(f"Failed to delete temporary HTML file {html_path}: {e}")
+
+
+def prepare_pdf_for_telegram(pdf_path):
+    """Copy PDF to a temp file with current date for Telegram sending."""
+    import shutil
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    temp_dir = tempfile.gettempdir()
+    dated_path = os.path.join(temp_dir, f"daily_rebalance_report_{date_str}.pdf")
+    shutil.copy2(pdf_path, dated_path)
+    logging.info(f"Prepared PDF for Telegram: {dated_path}")
+    return dated_path
+
+
 def parse_args():
     parser = ArgumentParser(
         description=__doc__, formatter_class=RawDescriptionHelpFormatter
@@ -1511,8 +1410,8 @@ def parse_args():
     parser.add_argument(
         "--start-date",
         type=str,
-        required=True,
-        help="Start date for analysis (YYYY-MM-DD format)",
+        default="2010-02-10",
+        help="Start date for analysis (YYYY-MM-DD format, default: 2010-02-10)",
     )
     parser.add_argument(
         "--end-date",
@@ -1529,70 +1428,173 @@ def parse_args():
     parser.add_argument(
         "--open",
         action="store_true",
-        help="Open the HTML report in browser after generation",
+        help="Open the report in browser after generation",
+    )
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Generate a PDF report instead of HTML (requires Playwright)",
+    )
+    parser.add_argument(
+        "--send-telegram",
+        action="store_true",
+        help="Send the generated report to Telegram",
+    )
+    parser.add_argument(
+        "-b",
+        "--run-as-bot",
+        action="store_true",
+        default=False,
+        help="Run as bot (scheduled at 9:00 AM on weekdays)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        default=False,
+        help="Send Telegram alert once and exit (alias for --send-telegram)",
     )
     return parser.parse_args()
+
+
+def is_weekday():
+    return datetime.now().weekday() < 5
+
+
+def generate_report(
+    start_date,
+    end_date=None,
+    use_pdf=False,
+    report_path="daily_rebalance_report.html",
+    send_telegram=False,
+    open_report=False,
+    use_alternate=True,
+):
+    """Shared pipeline: fetch data, analyze, generate report, optionally send/open."""
+    if end_date is None:
+        end_date = datetime.now()
+
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    logging.info(f"Analysis period: {start_dt.date()} to {end_dt.date()}")
+
+    vix_signals_fig, vix_signals_stats = run_vix_signals_analysis(start_dt, end_dt)
+    credit_market_fig, credit_market_stats = run_credit_analysis(start_dt, end_dt)
+
+    if credit_market_fig is None:
+        logging.error("Credit analysis failed")
+        return None
+
+    all_market_data = fetch_tqqq_data(start_dt, end_dt)
+    tqqq_fig, tqqq_stats, alternate_label = run_tqqq_bucket_analysis(
+        all_market_data, start_dt, use_alternate=use_alternate
+    )
+
+    if tqqq_fig is None:
+        logging.error("TQQQ analysis failed")
+        return None
+
+    regime_fig, regime_stats = run_tqqq_regime_analysis(all_market_data, start_dt)
+
+    if regime_fig is None:
+        logging.error("Regime analysis failed")
+        return None
+
+    html_content = generate_html_report(
+        vix_signals_fig,
+        vix_signals_stats,
+        credit_market_fig,
+        credit_market_stats,
+        tqqq_fig,
+        tqqq_stats,
+        alternate_label,
+        regime_fig,
+        regime_stats,
+        start_dt,
+        end_dt,
+    )
+
+    if use_pdf:
+        logging.info("Generating PDF report...")
+        result_path = generate_pdf_report(html_content, report_path)
+    else:
+        logging.info("Generating HTML report...")
+        result_path = save_report(html_content, report_path)
+
+    logging.info(f"Report saved to {result_path}")
+
+    if send_telegram:
+        if result_path.endswith(".pdf"):
+            result_path = prepare_pdf_for_telegram(result_path)
+        send_file_to_telegram(
+            f"Daily Rebalance Report ({start_dt.date()} to {end_dt.date()})",
+            result_path,
+        )
+        logging.info("Telegram message sent successfully")
+
+    if open_report:
+        logging.info("Opening report...")
+        webbrowser.open(f"file://{os.path.abspath(result_path)}")
+
+    return result_path
+
+
+def run_bot(start_date, use_alternate=True, use_pdf=False):
+    """Run the daily report and send to Telegram."""
+    if not is_weekday():
+        logging.info("Not a weekday, skipping...")
+        return
+
+    logging.info(f"Running bot at {datetime.now()}")
+
+    try:
+        generate_report(
+            start_date=start_date,
+            use_pdf=use_pdf,
+            send_telegram=True,
+            use_alternate=use_alternate,
+        )
+    except Exception as e:
+        logging.error(f"Error in run_bot: {e}", exc_info=True)
+
+
+def schedule_bot(start_date, use_pdf=False):
+    """Schedule the bot to run at 9:00 AM on weekdays."""
+    logging.info("Starting Daily Rebalance Report Bot...")
+    logging.info("Scheduled to run at 9:00 AM on weekdays")
+
+    for day in ("monday", "tuesday", "wednesday", "thursday", "friday"):
+        getattr(schedule.every(), day).at("09:00").do(
+            lambda: run_bot(start_date=start_date, use_pdf=use_pdf)
+        )
+
+    logging.info("Running initial check...")
+    run_bot(start_date=start_date, use_pdf=use_pdf)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
 
 
 def main(args):
     logging.info("Starting Daily Rebalance Report generation...")
 
     try:
-        start_date = pd.to_datetime(args.start_date)
-        end_date = pd.to_datetime(args.end_date)
-        logging.info(f"Analysis period: {start_date.date()} to {end_date.date()}")
-
-        vix_signals_fig, vix_signals_stats = run_vix_signals_analysis(
-            start_date, end_date
-        )
-        vix_comparative_fig = run_vix_comparative_analysis(start_date, end_date)
-        credit_market_fig, credit_market_stats = run_credit_analysis(
-            start_date, end_date
+        result = generate_report(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            use_pdf=args.pdf,
+            report_path=args.report_path,
+            send_telegram=args.send_telegram,
+            open_report=args.open,
         )
 
-        if credit_market_fig is None:
+        if result is None:
             return 1
 
-        all_market_data = fetch_tqqq_data(start_date, end_date)
-        tqqq_fig, tqqq_stats, alternate_label = run_tqqq_bucket_analysis(
-            all_market_data, start_date, use_alternate=True
-        )
+        print(f"\n✅ Report successfully generated: {result}")
 
-        if tqqq_fig is None:
-            return 1
-
-        regime_fig, regime_stats = run_tqqq_regime_analysis(all_market_data, start_date)
-
-        if regime_fig is None:
-            return 1
-
-        logging.info("Generating Options Expected Move Analysis...")
-        options_expected_move_img = generate_options_expected_move("SPY")
-
-        logging.info("Generating HTML report...")
-        html_content = generate_html_report(
-            vix_signals_fig,
-            vix_signals_stats,
-            vix_comparative_fig,
-            credit_market_fig,
-            credit_market_stats,
-            tqqq_fig,
-            tqqq_stats,
-            alternate_label,
-            regime_fig,
-            regime_stats,
-            options_expected_move_img,
-            start_date,
-            end_date,
-        )
-
-        report_path = save_report(html_content, args.report_path)
-        logging.info(f"Report saved to {report_path}")
-        print(f"\n✅ Report successfully generated: {report_path}")
-
-        if args.open:
-            logging.info("Opening report in browser...")
-            webbrowser.open(f"file://{os.path.abspath(report_path)}")
+        if args.send_telegram:
+            print("📨 Report sent to Telegram")
 
         return 0
 
@@ -1604,4 +1606,11 @@ def main(args):
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(args.verbose)
-    sys.exit(main(args))
+
+    if args.once:
+        args.send_telegram = True
+
+    if args.run_as_bot:
+        schedule_bot(start_date=args.start_date, use_pdf=args.pdf)
+    else:
+        sys.exit(main(args))
